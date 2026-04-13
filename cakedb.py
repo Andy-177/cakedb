@@ -21,7 +21,7 @@ TYPE_DECIMAL = 0x09
 TYPE_UINT = 0x0A
 
 # ==============================
-# Writer
+# CakeWriter
 # ==============================
 class CakeWriter:
     def __init__(self):
@@ -32,21 +32,26 @@ class CakeWriter:
 
     def write_null(self):
         self.write(struct.pack("B", TYPE_NULL))
+        self.write(struct.pack("<I", 0))
 
     def write_bool(self, v: bool):
         self.write(struct.pack("B", TYPE_BOOL))
+        self.write(struct.pack("<I", 1))
         self.write(struct.pack("B", 1 if v else 0))
 
     def write_int(self, v: int):
         self.write(struct.pack("B", TYPE_INT))
+        self.write(struct.pack("<I", 8))
         self.write(struct.pack("<q", v))
 
     def write_uint(self, v: int):
         self.write(struct.pack("B", TYPE_UINT))
+        self.write(struct.pack("<I", 8))
         self.write(struct.pack("<Q", v))
 
     def write_float(self, v: float):
         self.write(struct.pack("B", TYPE_FLOAT))
+        self.write(struct.pack("<I", 8))
         self.write(struct.pack("<d", v))
 
     def write_string(self, s: str):
@@ -62,45 +67,56 @@ class CakeWriter:
 
     def write_date(self, ts: int):
         self.write(struct.pack("B", TYPE_DATE))
+        self.write(struct.pack("<I", 8))
         self.write(struct.pack("<Q", ts))
 
     def write_decimal(self, integer: int, fractional: int):
         self.write(struct.pack("B", TYPE_DECIMAL))
+        self.write(struct.pack("<I", 16))
         self.write(struct.pack("<q", integer))
         self.write(struct.pack("<Q", fractional))
 
     def write_array(self, elements):
         self.write(struct.pack("B", TYPE_ARRAY))
-        self.write(struct.pack("<I", len(elements)))
+        temp = CakeWriter()
         for elem in elements:
-            self.write_any(self._auto_type(elem))
+            temp.write_any(elem)
+        body = temp.buf
+        self.write(struct.pack("<I", 4 + len(body)))
+        self.write(struct.pack("<I", len(elements)))
+        self.write(body)
 
-    def write_object(self, obj: dict):
+    def write_object(self, kvs):
+        """
+        kvs: list of (key, value) pairs
+        value can be either raw value or (type, value) tuple
+        """
         self.write(struct.pack("B", TYPE_OBJECT))
-        self.write(struct.pack("<I", len(obj)))
-        for k, v in obj.items():
-            self.write_any((TYPE_STRING, str(k)))
-            self.write_any(self._auto_type(v))
-
-    def _auto_type(self, v):
-        if v is None:
-            return (TYPE_NULL, None)
-        elif isinstance(v, bool):
-            return (TYPE_BOOL, v)
-        elif isinstance(v, int):
-            return (TYPE_UINT, v) if v >= 0 else (TYPE_INT, v)
-        elif isinstance(v, float):
-            return (TYPE_FLOAT, v)
-        elif isinstance(v, str):
-            return (TYPE_STRING, v)
-        elif isinstance(v, bytes):
-            return (TYPE_BLOB, v)
-        elif isinstance(v, (list, tuple)):
-            return (TYPE_ARRAY, list(v))
-        elif isinstance(v, dict):
-            return (TYPE_OBJECT, v)
-        else:
-            raise TypeError(f"Unsupported type: {type(v)}")
+        temp = CakeWriter()
+        for item in kvs:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                k, v = item
+                # Handle key
+                if isinstance(k, (list, tuple)) and len(k) == 2 and k[0] in range(0x0B):
+                    temp.write_any(k)  # k is already (type, value)
+                else:
+                    # k is raw value, wrap it
+                    temp.write_any(CakeDB._static_auto_type(k))
+                
+                # Handle value
+                if isinstance(v, (list, tuple)) and len(v) == 2 and v[0] in range(0x0B):
+                    temp.write_any(v)  # v is already (type, value)
+                else:
+                    # v is raw value, wrap it
+                    temp.write_any(CakeDB._static_auto_type(v))
+            else:
+                # Fallback for old format
+                temp.write_any(CakeDB._static_auto_type(item[0]))
+                temp.write_any(CakeDB._static_auto_type(item[1]))
+        body = temp.buf
+        self.write(struct.pack("<I", 4 + len(body)))
+        self.write(struct.pack("<I", len(kvs)))
+        self.write(body)
 
     def write_any(self, tv):
         t, v = tv
@@ -121,107 +137,92 @@ class CakeWriter:
         elif t == TYPE_DATE:
             self.write_date(v)
         elif t == TYPE_DECIMAL:
-            self.write_decimal(*v)
+            if not isinstance(v, (list, tuple)) or len(v) != 2:
+                raise ValueError("decimal must be (int, int)")
+            self.write_decimal(v[0], v[1])
         elif t == TYPE_ARRAY:
             self.write_array(v)
         elif t == TYPE_OBJECT:
             self.write_object(v)
+        else:
+            raise ValueError(f"invalid type {t}")
 
-    def build(self, root):
-        self.write(b"ck")
+    def build_file(self, root_tv):
+        self.write(b"cake")
         body = CakeWriter()
-        body.write_any(body._auto_type(root))
-        self.write(struct.pack("<Q", len(body.buf)))
-        self.write(body.buf)
+        body.write_any(root_tv)
+        b = body.buf
+        self.write(struct.pack("<Q", len(b)))
+        self.write(b)
         return self.buf
 
 # ==============================
-# Reader
+# CakeReader
 # ==============================
 class CakeReader:
     def __init__(self, data: bytes):
         self.data = data
         self.pos = 0
 
-    def read(self, size):
+    def read(self, size: int):
         res = self.data[self.pos:self.pos+size]
         self.pos += size
         return res
 
-    def read_null(self):
-        return None
-
-    def read_bool(self):
-        return self.read(1)[0] == 1
-
-    def read_int(self):
-        return struct.unpack("<q", self.read(8))[0]
-
-    def read_uint(self):
-        return struct.unpack("<Q", self.read(8))[0]
-
-    def read_float(self):
-        return struct.unpack("<d", self.read(8))[0]
-
-    def read_string(self):
-        length = struct.unpack("<I", self.read(4))[0]
-        return self.read(length).decode("utf-8")
-
-    def read_blob(self):
-        length = struct.unpack("<I", self.read(4))[0]
-        return self.read(length)
-
-    def read_date(self):
-        return struct.unpack("<Q", self.read(8))[0]
-
-    def read_decimal(self):
-        return (struct.unpack("<q", self.read(8))[0], struct.unpack("<Q", self.read(8))[0])
-
-    def read_array(self):
-        length = struct.unpack("<I", self.read(4))[0]
-        return [self.read_any() for _ in range(length)]
-
-    def read_object(self):
-        length = struct.unpack("<I", self.read(4))[0]
-        obj = {}
-        for _ in range(length):
-            k = self.read_any()
-            v = self.read_any()
-            obj[k] = v
-        return obj
-
     def read_any(self):
-        t = self.read(1)[0]
-        if t == TYPE_NULL:
-            return self.read_null()
-        elif t == TYPE_BOOL:
-            return self.read_bool()
-        elif t == TYPE_INT:
-            return self.read_int()
-        elif t == TYPE_UINT:
-            return self.read_uint()
-        elif t == TYPE_FLOAT:
-            return self.read_float()
-        elif t == TYPE_STRING:
-            return self.read_string()
-        elif t == TYPE_BLOB:
-            return self.read_blob()
-        elif t == TYPE_DATE:
-            return self.read_date()
-        elif t == TYPE_DECIMAL:
-            return self.read_decimal()
-        elif t == TYPE_ARRAY:
-            return self.read_array()
-        elif t == TYPE_OBJECT:
-            return self.read_object()
-        else:
-            raise ValueError(f"Unknown type: {t}")
+        type_id = struct.unpack("B", self.read(1))[0]
+        length = struct.unpack("<I", self.read(4))[0]
+        payload = self.read(length)
+        r = CakeReader(payload)
 
-    def parse(self):
-        if self.read(2) != b"ck":
-            raise ValueError("Invalid ck file")
-        self.read(8)
-        return self.read_any()
+        if type_id == TYPE_NULL:
+            return None
+        if type_id == TYPE_BOOL:
+            return payload[0] == 1
+        if type_id == TYPE_INT:
+            return struct.unpack("<q", payload)[0]
+        if type_id == TYPE_UINT:
+            return struct.unpack("<Q", payload)[0]
+        if type_id == TYPE_FLOAT:
+            return struct.unpack("<d", payload)[0]
+        if type_id == TYPE_STRING:
+            return payload.decode("utf-8")
+        if type_id == TYPE_BLOB:
+            return payload
+        if type_id == TYPE_DATE:
+            return struct.unpack("<Q", payload)[0]
+        if type_id == TYPE_DECIMAL:
+            return (struct.unpack("<q", payload[:8])[0], struct.unpack("<Q", payload[8:])[0])
+
+        if type_id == TYPE_ARRAY:
+            cnt = struct.unpack("<I", r.read(4))[0]
+            arr = [r.read_any() for _ in range(cnt)]
+            if r.pos != len(payload):
+                raise ValueError("array length mismatch")
+            return arr
+
+        if type_id == TYPE_OBJECT:
+            cnt = struct.unpack("<I", r.read(4))[0]
+            obj = {}
+            for _ in range(cnt):
+                k = r.read_any()
+                v = r.read_any()
+                obj[k] = v
+            if r.pos != len(payload):
+                raise ValueError("object length mismatch")
+            return obj
+
+        return payload
+
+    def read_file(self):
+        if self.read(4) != b"cake":
+            raise ValueError("invalid cake")
+        data_len = struct.unpack("<Q", self.read(8))[0]
+        start = self.pos
+        res = self.read_any()
+        if self.pos - start != data_len:
+            raise ValueError("data length mismatch")
+        return res
 
 # ==============================
 # autoexp
@@ -232,16 +233,19 @@ def autoexp(path=None):
         def wrapper(db, *args, **kwargs):
             try:
                 res = func(db, *args, **kwargs)
-                success = ("insert success", "update success", "delete success", "clear success", "imp success", "j2d success")
-                if isinstance(res, str) and any(res.startswith(s) for s in success):
+                success_msgs = ("insert success", "update success", "delete success",
+                                "clear success", "imp success", "j2d success")
+                if isinstance(res, str) and any(res.startswith(s) for s in success_msgs):
                     if path is None:
                         db.exp()
                     else:
                         db.exp(path)
                 return res
             except Exception as e:
-                return f"autoexp error: {e}"
+                return f"autoexp error:{str(e)}"
         return wrapper
+    if callable(path):
+        return decorator(path)
     return decorator
 
 # ==============================
@@ -252,8 +256,11 @@ def dbtypelock(mode="all"):
         @wraps(func)
         def wrapper(db, *args, **kwargs):
             try:
-                if not hasattr(db, "data") or db.data is None:
-                    return "dbtypelock error: not imported"
+                db._check_imported()
+            except Exception as e:
+                return f"dbtypelock error:{str(e)}"
+
+            try:
                 fname = func.__name__
                 if len(args) < 1:
                     return func(db, *args, **kwargs)
@@ -262,116 +269,209 @@ def dbtypelock(mode="all"):
 
                 if fname in ("insert", "update") and key in db.data:
                     old_val = db.data[key]
-                    lval = mode in ("all", "value")
-                    lkey = mode in ("all", "key")
+                    lock_val = mode in ("all", "value")
+                    lock_key = mode in ("all", "key")
 
-                    if lval and val is not None:
-                        pass
-                    if lkey:
-                        pass
+                    if lock_val and val is not None:
+                        t_old = db._auto_type(old_val)[0]
+                        t_new = db._auto_type(val)[0]
+                        if t_old != t_new:
+                            return f"{fname} error:value type mismatch"
+
+                    if lock_key:
+                        if db.data:
+                            keys = list(db.data.keys())
+                            first_type = type(keys[0])
+                            if not all(type(k) == first_type for k in keys):
+                                return f"{fname} error:inconsistent key types"
+                            if type(key) != first_type:
+                                return f"{fname} error:key type mismatch"
+                        else:
+                            if not hasattr(db, '_key_type'):
+                                db._key_type = type(key)
+                            else:
+                                if type(key) != db._key_type:
+                                    return f"{fname} error:key type mismatch"
             except Exception:
                 pass
-            return func(db, *args, **kwargs)
+
+            try:
+                return func(db, *args, **kwargs)
+            except Exception as e:
+                return f"{fname} error:{str(e)}"
         return wrapper
     if callable(mode):
         return decorator(mode)
     return decorator
 
 # ==============================
-# MAIN DB CLASS
+# CakeDB
 # ==============================
 class CakeDB:
     def __init__(self):
         self.current_file = None
+        self.root = None
         self.data = None
+        self._key_type = None
+
+    @staticmethod
+    def _static_auto_type(v):
+        """Static version for use without instance"""
+        if v is None:
+            return (TYPE_NULL, None)
+        if isinstance(v, bool):
+            return (TYPE_BOOL, v)
+        if isinstance(v, int):
+            return (TYPE_UINT, v) if v >= 0 else (TYPE_INT, v)
+        if isinstance(v, float):
+            return (TYPE_FLOAT, v)
+        if isinstance(v, str):
+            return (TYPE_STRING, v)
+        if isinstance(v, bytes):
+            return (TYPE_BLOB, v)
+        if isinstance(v, (list, tuple)):
+            return (TYPE_ARRAY, [CakeDB._static_auto_type(x) for x in v])
+        if isinstance(v, dict):
+            # items: list of (key, value_type_tuple)
+            # key is raw, value is (type, value)
+            items = [(k, CakeDB._static_auto_type(val)) for k, val in v.items()]
+            return (TYPE_OBJECT, items)
+        raise TypeError(f"unsupported type: {type(v)}")
+
+    def _auto_type(self, v):
+        """Instance version for compatibility"""
+        return CakeDB._static_auto_type(v)
+
+    def _check_imported(self):
+        if self.root is None or self.data is None:
+            raise Exception("not imported")
 
     def imp(self, path):
         try:
-            with open(path, "rb") as f:
+            p = os.path.abspath(path)
+            with open(p, "rb") as f:
                 data = f.read()
-            self.data = CakeReader(data).parse()
-            self.current_file = path
-            return f"imp success: {path}"
+            obj = CakeReader(data).read_file()
+            self.root = self._auto_type(obj)
+            self.data = obj
+            self.current_file = p
+            self._key_type = None
+            return f"imp success:{p}"
         except Exception as e:
-            return f"imp error: {e}"
+            return f"imp error:{str(e)}"
 
     def exp(self, path=None):
         try:
-            if self.data is None:
-                return "exp error: no data"
-            p = path or self.current_file
-            buf = CakeWriter().build(self.data)
-            with open(p, "wb") as f:
+            self._check_imported()
+            if path is None and self.current_file is None:
+                return "exp error:no file opened"
+            p = os.path.abspath(path or self.current_file)
+            d = os.path.dirname(p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            buf = CakeWriter().build_file(self.root)
+            tmp = p + ".tmp"
+            with open(tmp, "wb") as f:
                 f.write(buf)
-            return f"exp success: {p}"
+            os.replace(tmp, p)
+            return f"exp success:{p}"
         except Exception as e:
-            return f"exp error: {e}"
+            return f"exp error:{str(e)}"
 
     def j2d(self, jpath, out=None):
         try:
-            with open(jpath, "r", encoding="utf-8") as f:
+            jp = os.path.abspath(jpath)
+            op = out or (os.path.splitext(jpath)[0] + ".ck")
+            op = os.path.abspath(op)
+            with open(jp, "r", encoding="utf-8") as f:
                 obj = json.load(f)
+            self.root = self._auto_type(obj)
             self.data = obj
-            self.current_file = out or os.path.splitext(jpath)[0] + ".ck"
-            return self.exp()
+            self.current_file = op
+            self._key_type = None
+            return self.exp(op)
         except Exception as e:
-            return f"j2d error: {e}"
+            return f"j2d error:{str(e)}"
+
+    def _to_json_safe(self, obj):
+        if isinstance(obj, bytes):
+            return base64.b64encode(obj).decode()
+        if isinstance(obj, (list, tuple)):
+            return [self._to_json_safe(x) for x in obj]
+        if isinstance(obj, dict):
+            return {k: self._to_json_safe(v) for k, v in obj.items()}
+        return obj
 
     def d2j(self, out=None):
         try:
-            if self.data is None:
-                return "d2j error: no data"
-            p = out or os.path.splitext(self.current_file)[0] + ".json"
-            def safe(o):
-                if isinstance(o, bytes):
-                    return base64.b64encode(o).decode()
-                if isinstance(o, (list, tuple)):
-                    return [safe(i) for i in o]
-                if isinstance(o, dict):
-                    return {str(k): safe(v) for k, v in o.items()}
-                return o
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(safe(self.data), f, ensure_ascii=False, indent=2)
-            return f"d2j success: {p}"
+            self._check_imported()
+            if not self.current_file:
+                return "d2j error:no file opened"
+            op = out or (os.path.splitext(self.current_file)[0] + ".json")
+            op = os.path.abspath(op)
+            safe_data = self._to_json_safe(self.data)
+            os.makedirs(os.path.dirname(op), exist_ok=True)
+            with open(op, "w", encoding="utf-8") as f:
+                json.dump(safe_data, f, ensure_ascii=False, indent=2)
+            return f"d2j success:{op}"
         except Exception as e:
-            return f"d2j error: {e}"
+            return f"d2j error:{str(e)}"
 
     def insert(self, key, val):
         try:
-            if self.data is None:
-                self.data = {}
+            self._check_imported()
             self.data[key] = val
-            return f"insert success: {key}"
+            self.root = self._auto_type(self.data)
+            return f"insert success:{key}"
         except Exception as e:
-            return f"insert error: {e}"
+            return f"insert error:{str(e)}"
 
     def update(self, key, val):
-        return self.insert(key, val)
+        try:
+            self._check_imported()
+            if key not in self.data:
+                return "update error:key not found"
+            self.data[key] = val
+            self.root = self._auto_type(self.data)
+            return f"update success:{key}"
+        except Exception as e:
+            return f"update error:{str(e)}"
 
     def delete(self, key):
         try:
+            self._check_imported()
+            if key not in self.data:
+                return "delete error:key not found"
             del self.data[key]
-            return f"delete success: {key}"
+            self.root = self._auto_type(self.data)
+            return f"delete success:{key}"
         except Exception as e:
-            return f"delete error: {e}"
+            return f"delete error:{str(e)}"
 
     def clear(self):
         try:
+            self._check_imported()
             self.data = {}
+            self.root = self._auto_type(self.data)
+            self._key_type = None
             return "clear success"
         except Exception as e:
-            return f"clear error: {e}"
+            return f"clear error:{str(e)}"
 
     def select(self, key=None):
         try:
+            self._check_imported()
             if key is None:
-                return f"select success: {json.dumps(self.data, ensure_ascii=False)}"
-            return f"select success: {json.dumps(self.data.get(key), ensure_ascii=False)}"
+                return f"select success:{json.dumps(self._to_json_safe(self.data), ensure_ascii=False)}"
+            if key not in self.data:
+                return f"select error:key not found"
+            return f"select success:{json.dumps(self._to_json_safe(self.data[key]), ensure_ascii=False)}"
         except Exception as e:
-            return f"select error: {e}"
+            return f"select error:{str(e)}"
 
     def count(self):
         try:
-            return f"count success: {len(self.data) if isinstance(self.data, (dict, list)) else 0}"
+            self._check_imported()
+            return f"count success:{len(self.data)}"
         except Exception as e:
-            return f"count error: {e}"
+            return f"count error:{str(e)}"
