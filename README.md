@@ -8,7 +8,7 @@ CakeDB是一款基于JSON的对象数据库，该数据库仿照JSON格式将JSO
 
 CakeDB的数据库文件是JSON的超集，在使用其自带的转换功能时可以实现原始JSON和转换后的JSON结构无损，也就是将原始文件和转换回来的JSON全部压缩成单行进行哈希值比较，结果是两边哈希值完全一致，这说明cakedb完整地保留了整个JSON的结构，转换回去的文件只有排版和原JSON不同，但是结构和原JSON完全一致，可以正常读取。
 
-使用下面的python代码可以测试是否结构完整：
+**使用下面的python代码可以测试是否结构完整：**
 ```
 import json
 from cakedb import CakeDB  # 假设上面的代码保存为 your_module.py
