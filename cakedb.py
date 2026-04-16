@@ -394,7 +394,10 @@ class CakeDB:
             self.data = obj
             self.current_file = op
             self._key_type = None
-            return self.exp(op)
+            result = self.exp(op)
+            if result.startswith("exp success"):
+                return f"j2d success:{op}"
+            return result
         except Exception as e:
             return f"j2d error:{str(e)}"
 
