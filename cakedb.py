@@ -2,8 +2,9 @@ import struct
 import os
 import json
 import base64
-from typing import Any, Callable
+from typing import Callable
 from functools import wraps
+from enum import Enum
 
 # ==============================
 # 类型常量
@@ -19,6 +20,103 @@ TYPE_BLOB = 0x07
 TYPE_DATE = 0x08
 TYPE_DECIMAL = 0x09
 TYPE_UINT = 0x0A
+
+# ==============================
+# CakeUtils 工具类
+# ==============================
+class CakeUtils:
+    # 锁定模式枚举
+    class LockMode(Enum):
+        ALL = "all"
+        KEY = "key"
+        VALUE = "value"
+
+    @staticmethod
+    def autoexp(path=None):
+        def decorator(func: Callable):
+            @wraps(func)
+            def wrapper(db, *args, **kwargs):
+                try:
+                    res = func(db, *args, **kwargs)
+                    success_msgs = ("insert success", "update success", "delete success",
+                                    "clear success", "imp success", "j2d success")
+                    if isinstance(res, str) and any(res.startswith(s) for s in success_msgs):
+                        if path is None:
+                            db.exp()
+                        else:
+                            db.exp(path)
+                    return res
+                except Exception as e:
+                    return f"autoexp error:{str(e)}"
+            return wrapper
+        if callable(path):
+            return decorator(path)
+        return decorator
+
+    @staticmethod
+    def dbtypelock(mode=None):
+        # 无参数装饰器：@CakeUtils.dbtypelock → 默认 ALL
+        if callable(mode):
+            func = mode
+            utils = CakeUtils
+            return utils.dbtypelock(utils.LockMode.ALL)(func)
+
+        # 有参数装饰器：@CakeUtils.dbtypelock(...)
+        mode = mode or CakeUtils.LockMode.ALL
+        if isinstance(mode, CakeUtils.LockMode):
+            mode_val = mode.value
+        else:
+            mode_val = str(mode).lower()
+
+        def decorator(func: Callable):
+            @wraps(func)
+            def wrapper(db, *args, **kwargs):
+                try:
+                    db._check_imported()
+                except Exception as e:
+                    return f"dbtypelock error:{str(e)}"
+
+                try:
+                    fname = func.__name__
+                    if len(args) < 1:
+                        return func(db, *args, **kwargs)
+                    key = args[0]
+                    val = args[1] if len(args) > 1 else None
+
+                    if fname in ("insert", "update") and key in db.data:
+                        old_val = db.data[key]
+                        lock_val = mode_val in ("all", "value")
+                        lock_key = mode_val in ("all", "key")
+
+                        if lock_val and val is not None:
+                            t_old = db._auto_type(old_val)[0]
+                            t_new = db._auto_type(val)[0]
+                            if t_old != t_new:
+                                return f"{fname} error:value type mismatch"
+
+                        if lock_key:
+                            if db.data:
+                                keys = list(db.data.keys())
+                                first_type = type(keys[0])
+                                if not all(type(k) == first_type for k in keys):
+                                    return f"{fname} error:inconsistent key types"
+                                if type(key) != first_type:
+                                    return f"{fname} error:key type mismatch"
+                            else:
+                                if not hasattr(db, '_key_type'):
+                                    db._key_type = type(key)
+                                else:
+                                    if type(key) != db._key_type:
+                                        return f"{fname} error:key type mismatch"
+                except Exception:
+                    pass
+
+                try:
+                    return func(db, *args, **kwargs)
+                except Exception as e:
+                    return f"{fname} error:{str(e)}"
+            return wrapper
+        return decorator
 
 # ==============================
 # CakeWriter
@@ -87,30 +185,21 @@ class CakeWriter:
         self.write(body)
 
     def write_object(self, kvs):
-        """
-        kvs: list of (key, value) pairs
-        value can be either raw value or (type, value) tuple
-        """
         self.write(struct.pack("B", TYPE_OBJECT))
         temp = CakeWriter()
         for item in kvs:
             if isinstance(item, (list, tuple)) and len(item) == 2:
                 k, v = item
-                # Handle key
                 if isinstance(k, (list, tuple)) and len(k) == 2 and k[0] in range(0x0B):
-                    temp.write_any(k)  # k is already (type, value)
+                    temp.write_any(k)
                 else:
-                    # k is raw value, wrap it
                     temp.write_any(CakeDB._static_auto_type(k))
                 
-                # Handle value
                 if isinstance(v, (list, tuple)) and len(v) == 2 and v[0] in range(0x0B):
-                    temp.write_any(v)  # v is already (type, value)
+                    temp.write_any(v)
                 else:
-                    # v is raw value, wrap it
                     temp.write_any(CakeDB._static_auto_type(v))
             else:
-                # Fallback for old format
                 temp.write_any(CakeDB._static_auto_type(item[0]))
                 temp.write_any(CakeDB._static_auto_type(item[1]))
         body = temp.buf
@@ -225,86 +314,6 @@ class CakeReader:
         return res
 
 # ==============================
-# autoexp
-# ==============================
-def autoexp(path=None):
-    def decorator(func: Callable):
-        @wraps(func)
-        def wrapper(db, *args, **kwargs):
-            try:
-                res = func(db, *args, **kwargs)
-                success_msgs = ("insert success", "update success", "delete success",
-                                "clear success", "imp success", "j2d success")
-                if isinstance(res, str) and any(res.startswith(s) for s in success_msgs):
-                    if path is None:
-                        db.exp()
-                    else:
-                        db.exp(path)
-                return res
-            except Exception as e:
-                return f"autoexp error:{str(e)}"
-        return wrapper
-    if callable(path):
-        return decorator(path)
-    return decorator
-
-# ==============================
-# dbtypelock
-# ==============================
-def dbtypelock(mode="all"):
-    def decorator(func: Callable):
-        @wraps(func)
-        def wrapper(db, *args, **kwargs):
-            try:
-                db._check_imported()
-            except Exception as e:
-                return f"dbtypelock error:{str(e)}"
-
-            try:
-                fname = func.__name__
-                if len(args) < 1:
-                    return func(db, *args, **kwargs)
-                key = args[0]
-                val = args[1] if len(args) > 1 else None
-
-                if fname in ("insert", "update") and key in db.data:
-                    old_val = db.data[key]
-                    lock_val = mode in ("all", "value")
-                    lock_key = mode in ("all", "key")
-
-                    if lock_val and val is not None:
-                        t_old = db._auto_type(old_val)[0]
-                        t_new = db._auto_type(val)[0]
-                        if t_old != t_new:
-                            return f"{fname} error:value type mismatch"
-
-                    if lock_key:
-                        if db.data:
-                            keys = list(db.data.keys())
-                            first_type = type(keys[0])
-                            if not all(type(k) == first_type for k in keys):
-                                return f"{fname} error:inconsistent key types"
-                            if type(key) != first_type:
-                                return f"{fname} error:key type mismatch"
-                        else:
-                            if not hasattr(db, '_key_type'):
-                                db._key_type = type(key)
-                            else:
-                                if type(key) != db._key_type:
-                                    return f"{fname} error:key type mismatch"
-            except Exception:
-                pass
-
-            try:
-                return func(db, *args, **kwargs)
-            except Exception as e:
-                return f"{fname} error:{str(e)}"
-        return wrapper
-    if callable(mode):
-        return decorator(mode)
-    return decorator
-
-# ==============================
 # CakeDB
 # ==============================
 class CakeDB:
@@ -316,7 +325,6 @@ class CakeDB:
 
     @staticmethod
     def _static_auto_type(v):
-        """Static version for use without instance"""
         if v is None:
             return (TYPE_NULL, None)
         if isinstance(v, bool):
@@ -332,14 +340,11 @@ class CakeDB:
         if isinstance(v, (list, tuple)):
             return (TYPE_ARRAY, [CakeDB._static_auto_type(x) for x in v])
         if isinstance(v, dict):
-            # items: list of (key, value_type_tuple)
-            # key is raw, value is (type, value)
             items = [(k, CakeDB._static_auto_type(val)) for k, val in v.items()]
             return (TYPE_OBJECT, items)
         raise TypeError(f"unsupported type: {type(v)}")
 
     def _auto_type(self, v):
-        """Instance version for compatibility"""
         return CakeDB._static_auto_type(v)
 
     def _check_imported(self):
