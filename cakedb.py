@@ -323,6 +323,43 @@ class CakeDB:
         self.data = None
         self._key_type = None
 
+    def createdb(self, path):
+        """
+        创建一个空的数据库文件
+        :param path: 必选参数，支持绝对和相对路径
+        :return: 成功返回 "createdb success:路径"，失败返回错误信息
+        """
+        try:
+            # 检查参数
+            if path is None or path == "":
+                return "createdb error:missing param"
+            
+            # 获取绝对路径
+            p = os.path.abspath(path)
+            
+            # 检查文件是否已存在
+            if os.path.exists(p):
+                return f"createdb error:file already exists:{p}"
+            
+            # 创建空数据库对象（空字典）
+            empty_obj = {}
+            root_tv = self._auto_type(empty_obj)
+            
+            # 创建目录（如果不存在）
+            d = os.path.dirname(p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            
+            # 写入空数据库文件
+            buf = CakeWriter().build_file(root_tv)
+            with open(p, "wb") as f:
+                f.write(buf)
+            
+            return f"createdb success:{p}"
+            
+        except Exception as e:
+            return f"createdb error:{str(e)}"
+
     @staticmethod
     def _static_auto_type(v):
         if v is None:
