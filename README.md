@@ -33,3 +33,6 @@ with open("input.json", "r", encoding="utf-8") as f:
 print(f"✅ 转换完成！数据一致: {restored == original}")
 
 ```
+
+# VersionCodeNamingRules
+[VersionCodeNamingRules](VersionCodeNamingRules.png)
