@@ -520,3 +520,120 @@ class CakeDB:
             return f"count success:{len(self.data)}"
         except Exception as e:
             return f"count error:{str(e)}"
+        
+    def expo(self, key, path):
+        """
+        将键对应的对象导出为cko文件
+        :param key: 要导出对象的对应键
+        :param path: 保存路径
+        :return: 成功返回 "expo success:路径"，失败返回错误信息
+        """
+        try:
+            # 检查参数
+            if key is None or path is None:
+                return "expo error:missing param"
+            
+            # 检查数据库是否已导入
+            self._check_imported()
+            
+            # 检查key是否存在
+            if key not in self.data:
+                return f"expo error:key not found"
+            
+            # 获取键对应的值
+            value = self.data[key]
+            
+            # 获取值的类型
+            value_tv = self._auto_type(value)
+            
+            # 检查类型是否为TYPE_OBJECT
+            if value_tv[0] != TYPE_OBJECT:
+                return "expo error:Invalid type:This is not an object type"
+            
+            # 获取绝对路径
+            p = os.path.abspath(path)
+            
+            # 创建目录（如果不存在）
+            d = os.path.dirname(p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            
+            # 构建cko文件
+            # 魔数 "cko" + 值的完整原始数据
+            buf = bytearray()
+            buf.extend(b"cko")  # 魔数
+            
+            # 写入值的原始数据
+            writer = CakeWriter()
+            writer.write_any(value_tv)
+            buf.extend(writer.buf)
+            
+            # 写入文件
+            with open(p, "wb") as f:
+                f.write(buf)
+            
+            return f"expo success:{p}"
+            
+        except Exception as e:
+            return f"expo error:{str(e)}"
+
+    def impo(self, key, path, forced=False):
+        """
+        挂载cko文件
+        :param key: 要被挂载到的键
+        :param path: cko文件的路径
+        :param forced: 是否开启强制模式，默认False
+        :return: 成功返回 "impo success:键"，失败返回错误信息
+        """
+        try:
+            # 检查参数
+            if key is None or path is None:
+                return "impo error:missing param"
+            
+            # 检查数据库是否已导入
+            self._check_imported()
+            
+            # 获取绝对路径
+            p = os.path.abspath(path)
+            
+            # 检查文件是否存在
+            if not os.path.exists(p):
+                return f"impo error:file not found:{p}"
+            
+            # 读取cko文件
+            with open(p, "rb") as f:
+                data = f.read()
+            
+            # 检查魔数
+            if len(data) < 3 or data[:3] != b"cko":
+                return "impo error:invalid cko file format"
+            
+            # 解析值
+            reader = CakeReader(data[3:])
+            value_tv = reader.read_any()
+            
+            # 验证解析是否完整
+            if reader.pos != len(data[3:]):
+                return "impo error:invalid cko file format"
+            
+            # 验证类型是否为OBJECT
+            if value_tv[0] != TYPE_OBJECT:
+                return "impo error:Invalid type:This is not an object type"
+            
+            # 获取实际的值
+            value = value_tv[1]
+            
+            # 处理强制模式
+            if not forced:
+                # 非强制模式：检查key是否已存在且值不为空
+                if key in self.data and self.data[key]:
+                    return "impo error:value is not empty"
+            
+            # 插入或替换数据
+            self.data[key] = value
+            self.root = self._auto_type(self.data)
+            
+            return f"impo success:{key}"
+            
+        except Exception as e:
+            return f"impo error:{str(e)}"
