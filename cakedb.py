@@ -20,6 +20,13 @@ TYPE_BLOB = 0x07
 TYPE_DATE = 0x08
 TYPE_DECIMAL = 0x09
 TYPE_UINT = 0x0A
+TYPE_MARK = 0x0B  # 新增标记类型
+
+# ==============================
+# 标记常量
+# ==============================
+MARK_EMPTY = 0x0000      # 空标记
+MARK_TAG = 0x0001        # tag标签
 
 # ==============================
 # CakeUtils 工具类
@@ -190,22 +197,38 @@ class CakeWriter:
         for item in kvs:
             if isinstance(item, (list, tuple)) and len(item) == 2:
                 k, v = item
-                if isinstance(k, (list, tuple)) and len(k) == 2 and k[0] in range(0x0B):
+                if isinstance(k, (list, tuple)) and len(k) == 2 and k[0] in range(0x0C):
                     temp.write_any(k)
                 else:
                     temp.write_any(CakeDB._static_auto_type(k))
                 
-                if isinstance(v, (list, tuple)) and len(v) == 2 and v[0] in range(0x0B):
+                if isinstance(v, (list, tuple)) and len(v) == 2 and v[0] in range(0x0C):
                     temp.write_any(v)
                 else:
                     temp.write_any(CakeDB._static_auto_type(v))
             else:
-                temp.write_any(CakeDB._static_auto_type(item[0]))
-                temp.write_any(CakeDB._static_auto_type(item[1]))
+                raise ValueError("object item must be (key, value) pair")
         body = temp.buf
         self.write(struct.pack("<I", 4 + len(body)))
         self.write(struct.pack("<I", len(kvs)))
         self.write(body)
+
+    def write_mark(self, mark_const: int, metadata: bytes, real_tv):
+        """
+        写入标记类型
+        :param mark_const: 标记常量(2字节)
+        :param metadata: 二进制元数据
+        :param real_tv: 真实数据的(type, value)
+        """
+        meta_len = len(metadata)
+        self.write(struct.pack("B", TYPE_MARK))
+        # 先写入标记常量、元数据长度、元数据
+        self.write(struct.pack("<H", mark_const))
+        self.write(struct.pack("<I", meta_len))
+        if meta_len > 0:
+            self.write(metadata)
+        # 再写入真实数据
+        self.write_any(real_tv)
 
     def write_any(self, tv):
         t, v = tv
@@ -233,6 +256,11 @@ class CakeWriter:
             self.write_array(v)
         elif t == TYPE_OBJECT:
             self.write_object(v)
+        elif t == TYPE_MARK:
+            # v 应该是 (mark_const, metadata, real_tv)
+            if not isinstance(v, (list, tuple)) or len(v) != 3:
+                raise ValueError("mark must be (mark_const, metadata, real_tv)")
+            self.write_mark(v[0], v[1], v[2])
         else:
             raise ValueError(f"invalid type {t}")
 
@@ -301,6 +329,18 @@ class CakeReader:
                 raise ValueError("object length mismatch")
             return obj
 
+        if type_id == TYPE_MARK:
+            # 读取标记常量
+            mark_const = struct.unpack("<H", self.read(2))[0]
+            # 读取元数据长度
+            meta_len = struct.unpack("<I", self.read(4))[0]
+            # 读取元数据
+            metadata = self.read(meta_len) if meta_len > 0 else b""
+            # 读取真实数据
+            real_value = self.read_any()
+            # 返回带标记信息的数据结构
+            return {"__mark__": True, "const": mark_const, "metadata": metadata, "value": real_value}
+
         return payload
 
     def read_file(self):
@@ -312,6 +352,105 @@ class CakeReader:
         if self.pos - start != data_len:
             raise ValueError("data length mismatch")
         return res
+    
+# ==============================
+# Marker 标记管理类
+# ==============================
+class Marker:
+    def __init__(self, db):
+        self.db = db
+    def rmk(self, key):
+        """
+        移除键对应的mark部分，只保留真实数据
+        :param key: 键名
+        :return: 成功返回 "rmk success:键"，失败返回错误信息
+        """
+        try:
+            self.db._check_imported()
+            if key not in self.db.data:
+                return f"rmk error:key not found"
+            
+            value = self.db.data[key]
+            if not CakeTag._is_marked(value):
+                return f"rmk error:key has no mark"
+            
+            # 移除标记，只保留真实值
+            self.db.data[key] = value["value"]
+            self.db.root = self.db._auto_type(self.db.data)
+            return f"rmk success:{key}"
+        except Exception as e:
+            return f"rmk error:{str(e)}"
+# ==============================
+# CakeTag 标记操作类
+# ==============================
+class CakeTag:
+    def __init__(self, db):
+        self.db = db
+    @staticmethod
+    def _is_marked(value):
+        """检查值是否带有标记"""
+        return isinstance(value, dict) and value.get("__mark__", False)
+
+    @staticmethod
+    def _unwrap_mark(value):
+        """提取标记中的真实值"""
+        if CakeTag._is_marked(value):
+            return value["value"]
+        return value
+
+    @staticmethod
+    def tagger(db, key: str, metadata: bytes = b""):
+        """
+        给指定键打上tag标签
+        :param db: CakeDB实例
+        :param key: 键名
+        :param metadata: 二进制元数据
+        :return: 成功返回 "tagger success:键"，失败返回错误信息
+        """
+        try:
+            db._check_imported()
+            if key not in db.data:
+                return f"tagger error:key not found"
+            
+            value = db.data[key]
+            
+            # 创建标记包装
+            marked_value = {
+                "__mark__": True,
+                "const": MARK_TAG,
+                "metadata": metadata if isinstance(metadata, bytes) else metadata.encode("utf-8"),
+                "value": value
+            }
+            
+            db.data[key] = marked_value
+            db.root = db._auto_type(db.data)
+            return f"tagger success:{key}"
+        except Exception as e:
+            return f"tagger error:{str(e)}"
+
+    @staticmethod
+    def gettag(db, key: str):
+        """
+        获取指定键的tag标签的二进制元数据
+        :param db: CakeDB实例
+        :param key: 键名
+        :return: 成功返回二进制元数据，失败返回错误信息
+        """
+        try:
+            db._check_imported()
+            if key not in db.data:
+                return f"gettag error:key not found"
+            
+            value = db.data[key]
+            if not CakeTag._is_marked(value):
+                return f"gettag error:key has no tag mark"
+            
+            if value["const"] != MARK_TAG:
+                return f"gettag error:mark is not a tag type"
+            
+            return value["metadata"]
+        except Exception as e:
+            return f"gettag error:{str(e)}"
 
 # ==============================
 # CakeDB
@@ -322,6 +461,20 @@ class CakeDB:
         self.root = None
         self.data = None
         self._key_type = None
+        self.caketag = None
+        self.marker = None
+        self._init_caketag()
+        self._init_marker()
+
+    def _init_caketag(self):
+        """初始化 tag 管理器"""
+        if self.caketag is None:
+            self.caketag = CakeTag(self)
+
+    def _init_marker(self):
+        """初始化 marker 管理器"""
+        if self.marker is None:
+            self.marker = Marker(self)
 
     def createdb(self, path):
         """
@@ -377,6 +530,12 @@ class CakeDB:
         if isinstance(v, (list, tuple)):
             return (TYPE_ARRAY, [CakeDB._static_auto_type(x) for x in v])
         if isinstance(v, dict):
+            # 检查是否是标记包装
+            if v.get("__mark__", False):
+                # 标记类型
+                real_tv = CakeDB._static_auto_type(v["value"])
+                return (TYPE_MARK, (v["const"], v["metadata"], real_tv))
+            # 普通对象
             items = [(k, CakeDB._static_auto_type(val)) for k, val in v.items()]
             return (TYPE_OBJECT, items)
         raise TypeError(f"unsupported type: {type(v)}")
@@ -444,6 +603,14 @@ class CakeDB:
         if isinstance(obj, (list, tuple)):
             return [self._to_json_safe(x) for x in obj]
         if isinstance(obj, dict):
+            # 如果是标记包装，转换为可读格式
+            if obj.get("__mark__", False):
+                return {
+                    "__mark__": True,
+                    "const": obj["const"],
+                    "metadata": base64.b64encode(obj["metadata"]).decode() if obj["metadata"] else "",
+                    "value": self._to_json_safe(obj["value"])
+                }
             return {k: self._to_json_safe(v) for k, v in obj.items()}
         return obj
 
@@ -546,9 +713,17 @@ class CakeDB:
             # 获取值的类型
             value_tv = self._auto_type(value)
             
-            # 检查类型是否为TYPE_OBJECT
-            if value_tv[0] != TYPE_OBJECT:
-                return "expo error:Invalid type:This is not an object type"
+            # 检查类型是否为TYPE_OBJECT（不包括标记包装）
+            # 如果值是标记包装，需要检查真实值是否为OBJECT
+            if CakeTag._is_marked(value):
+                if value_tv[0] != TYPE_MARK:
+                    return "expo error:Invalid type:This is not an object type"
+                real_tv = value_tv[1][2]  # 获取真实数据的tv
+                if real_tv[0] != TYPE_OBJECT:
+                    return "expo error:Invalid type:This is not an object type"
+            else:
+                if value_tv[0] != TYPE_OBJECT:
+                    return "expo error:Invalid type:This is not an object type"
             
             # 获取绝对路径
             p = os.path.abspath(path)
@@ -610,18 +785,22 @@ class CakeDB:
             
             # 解析值
             reader = CakeReader(data[3:])
-            value_tv = reader.read_any()
+            value = reader.read_any()
             
             # 验证解析是否完整
             if reader.pos != len(data[3:]):
                 return "impo error:invalid cko file format"
             
-            # 验证类型是否为OBJECT
-            if value_tv[0] != TYPE_OBJECT:
-                return "impo error:Invalid type:This is not an object type"
+            # 获取实际的值（可能是标记包装或普通值）
+            if isinstance(value, dict) and value.get("__mark__", False):
+                # 标记类型，提取真实值
+                real_value = value["value"]
+            else:
+                real_value = value
             
-            # 获取实际的值
-            value = value_tv[1]
+            # 检查类型是否为OBJECT
+            if not isinstance(real_value, dict):
+                return "impo error:Invalid type:This is not an object type"
             
             # 处理强制模式
             if not forced:
@@ -630,7 +809,7 @@ class CakeDB:
                     return "impo error:value is not empty"
             
             # 插入或替换数据
-            self.data[key] = value
+            self.data[key] = real_value
             self.root = self._auto_type(self.data)
             
             return f"impo success:{key}"
