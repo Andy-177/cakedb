@@ -687,7 +687,7 @@ class CakeDB:
             return f"count success:{len(self.data)}"
         except Exception as e:
             return f"count error:{str(e)}"
-        
+
     def expo(self, key, path):
         """
         将键对应的对象导出为cko文件
@@ -713,18 +713,6 @@ class CakeDB:
             # 获取值的类型
             value_tv = self._auto_type(value)
             
-            # 检查类型是否为TYPE_OBJECT（不包括标记包装）
-            # 如果值是标记包装，需要检查真实值是否为OBJECT
-            if CakeTag._is_marked(value):
-                if value_tv[0] != TYPE_MARK:
-                    return "expo error:Invalid type:This is not an object type"
-                real_tv = value_tv[1][2]  # 获取真实数据的tv
-                if real_tv[0] != TYPE_OBJECT:
-                    return "expo error:Invalid type:This is not an object type"
-            else:
-                if value_tv[0] != TYPE_OBJECT:
-                    return "expo error:Invalid type:This is not an object type"
-            
             # 获取绝对路径
             p = os.path.abspath(path)
             
@@ -738,7 +726,7 @@ class CakeDB:
             buf = bytearray()
             buf.extend(b"cko")  # 魔数
             
-            # 写入值的原始数据
+            # 写入值的原始数据（支持任何类型）
             writer = CakeWriter()
             writer.write_any(value_tv)
             buf.extend(writer.buf)
@@ -791,25 +779,33 @@ class CakeDB:
             if reader.pos != len(data[3:]):
                 return "impo error:invalid cko file format"
             
-            # 获取实际的值（可能是标记包装或普通值）
-            if isinstance(value, dict) and value.get("__mark__", False):
-                # 标记类型，提取真实值
-                real_value = value["value"]
-            else:
-                real_value = value
-            
-            # 检查类型是否为OBJECT
-            if not isinstance(real_value, dict):
-                return "impo error:Invalid type:This is not an object type"
-            
             # 处理强制模式
             if not forced:
                 # 非强制模式：检查key是否已存在且值不为空
                 if key in self.data and self.data[key]:
-                    return "impo error:value is not empty"
+                    # 对于不同的类型，判断是否为"空"
+                    current_val = self.data[key]
+                    is_empty = False
+                    
+                    if current_val is None:
+                        is_empty = True
+                    elif isinstance(current_val, (list, tuple)) and len(current_val) == 0:
+                        is_empty = True
+                    elif isinstance(current_val, dict) and len(current_val) == 0:
+                        is_empty = True
+                    elif isinstance(current_val, str) and current_val == "":
+                        is_empty = True
+                    elif isinstance(current_val, (int, float, bool)):
+                        # 数值类型和布尔类型不视为空
+                        is_empty = False
+                    else:
+                        is_empty = False
+                    
+                    if not is_empty:
+                        return "impo error:value is not empty"
             
-            # 插入或替换数据
-            self.data[key] = real_value
+            # 插入或替换数据（支持任何类型）
+            self.data[key] = value
             self.root = self._auto_type(self.data)
             
             return f"impo success:{key}"
